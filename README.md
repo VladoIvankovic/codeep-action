@@ -32,7 +32,7 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: VladoIvankovic/codeep-action@v1
         with:
           fail-on: error          # error | warning | info | none
