@@ -106,6 +106,46 @@ async function upsertSticky(owner, repo, prNumber, body, token) {
   }
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Run `npx codeep review ...` with retry resilience. `npx`'s fetch+install of
+ * codeep on a fresh runner can flake transiently (network, registry), which
+ * would otherwise fail a consumer's PR check for no real reason. Retry only the
+ * "couldn't run at all" case (no stdout); a non-zero exit WITH JSON means codeep
+ * ran and issues tripped the threshold (return immediately), and a maxBuffer
+ * overflow is deterministic (fail fast).
+ *
+ * Returns { stdout, exitCode }. Calls fail()/process.exit on a fatal outcome.
+ */
+async function runCodeep(args, attempts = 3) {
+  let last;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      const r = await execFileP('npx', args, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, env: process.env });
+      return { stdout: r.stdout, exitCode: 0 };
+    } catch (e) {
+      if (e && e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+        fail('codeep review output exceeded the 32MB buffer; cannot parse the result. Scope the PR or raise the limit.');
+      }
+      if (e && e.stdout) {
+        // codeep ran and produced JSON but exited non-zero → issues tripped the
+        // threshold. Clamp to the documented 0/1 contract; not a run failure.
+        return { stdout: e.stdout, exitCode: 1 };
+      }
+      // No stdout → install/spawn failure. Likely transient; retry with backoff.
+      last = e;
+      if (i < attempts) {
+        warn(`codeep run attempt ${i}/${attempts} failed (npx exit: ${e && e.code}); retrying…`);
+        await sleep(2000 * i);
+      }
+    }
+  }
+  const detail = String((last && (last.stderr || last.message)) || '').slice(0, 2000);
+  fail(`codeep review failed to run after ${attempts} attempts (npx exit: ${last && last.code}): ${detail}`);
+  return { stdout: '', exitCode: 1 }; // unreachable (fail exits); satisfies callers
+}
+
 async function main() {
   const version = process.env.INPUT_CODEEP_VERSION || 'latest';
   const failOn = validateFailOn(process.env.INPUT_FAIL_ON);
@@ -148,28 +188,7 @@ async function main() {
 
   // Run the reviewer with an args array (shell:false) + `--` + ./-prefix guard.
   const args = ['--yes', `codeep@${version}`, 'review', '--json', '--fail-on', failOn, '--', ...files];
-  let stdout;
-  let exitCode = 0;
-  try {
-    const r = await execFileP('npx', args, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, env: process.env });
-    stdout = r.stdout;
-  } catch (e) {
-    // codeep exits non-zero BY DESIGN when issues trip the threshold; that's not
-    // a run failure as long as it produced JSON. Distinguish the failure modes:
-    //  - maxBuffer overflow: e.code is the string 'ERR_..._MAXBUFFER' and e.stdout
-    //    is a TRUNCATED prefix — must NOT be parsed as "bad JSON" (infra failure).
-    //  - spawn/install failure: no stdout at all (e.code may be 'ENOENT' etc.).
-    if (e && e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
-      fail('codeep review output exceeded the 32MB buffer; cannot parse the result. Scope the PR or raise the limit.');
-    }
-    stdout = e && e.stdout;
-    if (!stdout) {
-      fail(`codeep review failed to run: ${String((e && (e.stderr || e.message)) || '').slice(0, 500)}`);
-    }
-    // Produced JSON but exited non-zero → issues tripped the threshold. Clamp to
-    // the documented 0/1 contract regardless of codeep's raw exit code.
-    exitCode = 1;
-  }
+  const { stdout, exitCode } = await runCodeep(args);
 
   let result;
   try {
