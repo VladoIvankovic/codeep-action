@@ -164,7 +164,8 @@ async function main() {
     }
     stdout = e && e.stdout;
     if (!stdout) {
-      fail(`codeep review failed to run: ${String((e && (e.stderr || e.message)) || '').slice(0, 500)}`);
+      const detail = String((e && (e.stderr || e.message)) || '').slice(0, 2000);
+      fail(`codeep review failed to run (npx exit: ${e && e.code}): ${detail}`);
     }
     // Produced JSON but exited non-zero → issues tripped the threshold. Clamp to
     // the documented 0/1 contract regardless of codeep's raw exit code.
