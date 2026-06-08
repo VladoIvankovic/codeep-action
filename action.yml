@@ -1,0 +1,78 @@
+name: "Codeep Review"
+description: "Run the Codeep offline reviewer on a pull request's changed files; post a sticky comment and inline annotations."
+author: "VladoIvankovic"
+branding:
+  icon: "check-circle"
+  color: "purple"
+
+inputs:
+  codeep-version:
+    description: "npm version or dist-tag of the codeep package to run (e.g. 'latest', '2.5.0'). Pin for reproducible reviews."
+    required: false
+    default: "latest"
+  fail-on:
+    description: "Severity threshold that fails the check: error | warning | info | none. 'none' never fails (informational mode)."
+    required: false
+    default: "error"
+  comment:
+    description: "Post/update a sticky summary comment on the PR ('true' | 'false')."
+    required: false
+    default: "true"
+  annotate:
+    description: "Emit inline GitHub annotations (error/warning/notice) for each issue ('true' | 'false')."
+    required: false
+    default: "true"
+  files:
+    description: "Optional space-separated list of files to review, overriding PR-derived changed files. Leave empty for normal PR use."
+    required: false
+    default: ""
+  max-annotations:
+    description: "Maximum number of inline annotations to emit."
+    required: false
+    default: "50"
+  max-issues-per-file:
+    description: "Maximum issues to list per file in the comment before collapsing to '...and N more'."
+    required: false
+    default: "10"
+  github-token:
+    description: "Token used to read PR files and post the comment. Defaults to the workflow's GITHUB_TOKEN."
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  score:
+    description: "Overall Codeep score (0-100). Empty string when the review was skipped."
+    value: ${{ steps.review.outputs.score }}
+  total-issues:
+    description: "Total number of issues found ('0' when skipped or clean)."
+    value: ${{ steps.review.outputs.total-issues }}
+  exit-code:
+    description: "Exit code from `codeep review` (0 = passed threshold, 1 = tripped). '0' when skipped."
+    value: ${{ steps.review.outputs.exit-code }}
+  skipped:
+    description: "'true' when no review ran (not a PR context, or no reviewable changed files)."
+    value: ${{ steps.review.outputs.skipped }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+
+    - name: Run Codeep review
+      id: review
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        INPUT_CODEEP_VERSION: ${{ inputs.codeep-version }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_COMMENT: ${{ inputs.comment }}
+        INPUT_ANNOTATE: ${{ inputs.annotate }}
+        INPUT_FILES: ${{ inputs.files }}
+        INPUT_MAX_ANNOTATIONS: ${{ inputs.max-annotations }}
+        INPUT_MAX_ISSUES_PER_FILE: ${{ inputs.max-issues-per-file }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: node "$ACTION_PATH/scripts/review.mjs"

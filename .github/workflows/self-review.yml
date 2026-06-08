@@ -1,0 +1,24 @@
+name: Codeep Review (self)
+
+# Dogfood: run this action on its own pull requests.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: codeep-self-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Codeep Review
+        uses: ./
+        with:
+          fail-on: warning
