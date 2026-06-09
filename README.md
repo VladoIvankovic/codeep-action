@@ -51,6 +51,8 @@ jobs:
 | `max-annotations` | `50` | Cap on inline annotations emitted. |
 | `max-issues-per-file` | `10` | Issues shown per file in the comment before `...and N more`. |
 | `github-token` | `${{ github.token }}` | Token to read PR files + post the comment. |
+| `dashboard-token` | `""` | Optional scoped Codeep CI token for [team analytics](#team-analytics-optional). Empty = disabled. |
+| `dashboard-url` | `https://codeep.dev` | Dashboard base URL that receives analytics. Override only for self-hosted. |
 
 ## Outputs
 
@@ -74,6 +76,24 @@ On pull requests **from forks**, GitHub forces `GITHUB_TOKEN` to **read-only** r
 
 > **Do not switch to `pull_request_target` just to comment on fork PRs.** That trigger runs with a write token; checking out and executing untrusted PR code under it leaks the token and your secrets. If you must comment on fork PRs, use the two-workflow `workflow_run` pattern (see GitHub Security Lab, "pwn requests").
 
+## Team analytics (optional)
+
+Set `dashboard-token` to send a **compact per-PR review summary** to your Codeep dashboard, where the **Reviews** view charts score trends, issue counts, per-repo health and review hotspots across your team.
+
+Mint a scoped CI token in the dashboard (Settings → CI tokens), store it as a repo/org secret, and pass it:
+
+```yaml
+      - uses: VladoIvankovic/codeep-action@v1.0.3
+        with:
+          fail-on: error
+          dashboard-token: ${{ secrets.CODEEP_DASHBOARD_TOKEN }}
+```
+
+- **Only counts leave the runner** — score, severity/category tallies, the worst-offender file paths, PR number, author and commit SHA. **No source code and no issue messages are sent.**
+- The token is **scoped**: it can post review events but **cannot read your API keys or sessions**, and is **revocable** any time from the dashboard.
+- It's **fire-and-forget**: posting failures (network, fork PR, revoked token) are logged as a notice and **never** change the review's pass/fail outcome. Bounded to a 5-second timeout.
+- **Fork PRs are skipped** — GitHub withholds secrets from fork-PR workflows, and a fork's run is never attributed to the base repo's analytics.
+
 ## How it relates to the Codeep CLI
 
 This action wraps the `codeep` npm package's `review` subcommand:
@@ -88,7 +108,8 @@ The same deterministic, offline reviewer you can run locally or in any CI. The a
 
 - File paths are passed to the CLI via an **args array** (`shell: false`) with a `--` separator and a `./`-prefix guard against option injection; traversal/absolute/NUL paths are dropped.
 - Comment writes are **best-effort**; the pass/fail check derives **solely** from `codeep review`'s exit code.
-- Zero runtime dependencies beyond Node 20 built-ins.
+- Team analytics (when enabled) sends **counts only** over TLS via a **scoped, revocable** token; never source, never your API keys.
+- Zero runtime dependencies beyond Node 24 built-ins.
 
 ## Versioning
 

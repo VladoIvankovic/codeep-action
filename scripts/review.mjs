@@ -1,18 +1,20 @@
 // codeep-action entry point. Resolves the PR context, fetches the changed
 // files, runs `codeep review <files> --json --fail-on <level>`, posts a sticky
 // PR comment + inline annotations, and exits with the reviewer's code (so the
-// PR check passes/fails per --fail-on). Zero deps — Node 20 built-ins only.
+// PR check passes/fails per --fail-on). Zero deps — Node 24 built-ins only.
 
 import { readFileSync, appendFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
   MARKER, validateFailOn, parseEvent, filterChangedFiles, sanitizeFiles,
-  buildAnnotations, formatComment,
+  buildAnnotations, formatComment, buildDashboardEvent,
 } from './lib.mjs';
 
 const execFileP = promisify(execFile);
 const API = 'https://api.github.com';
+const CI_TOKEN_HEADER = 'x-codeep-ci-token';
+const DASHBOARD_TIMEOUT_MS = 5000;
 
 const notice = (m) => console.log(`::notice::${m}`);
 const warn = (m) => console.log(`::warning::${m}`);
@@ -125,10 +127,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const REVIEW_TIMEOUT_MS = 180_000;
 
 async function runCodeep(args, attempts = 3) {
+  // The review child runs the CLI against PR-influenced config (custom
+  // .codeep/review rules). It never needs the dashboard secret — that token is
+  // only used by the analytics POST in THIS process — so strip it from the
+  // child's environment rather than inheriting it wholesale.
+  const childEnv = { ...process.env };
+  delete childEnv.INPUT_DASHBOARD_TOKEN;
   let last;
   for (let i = 1; i <= attempts; i++) {
     try {
-      const r = await execFileP('npx', args, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: REVIEW_TIMEOUT_MS, env: process.env });
+      const r = await execFileP('npx', args, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: REVIEW_TIMEOUT_MS, env: childEnv });
       return { stdout: r.stdout, exitCode: 0 };
     } catch (e) {
       if (e && e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
@@ -157,6 +165,36 @@ async function runCodeep(args, attempts = 3) {
   return { stdout: '', exitCode: 1 }; // unreachable (fail exits); satisfies callers
 }
 
+// Fire-and-forget: POST a compact review summary (counts + worst-offender
+// files; never source or messages) to the dashboard for team analytics. This is
+// strictly additive telemetry — it MUST never change the review outcome, so
+// every failure mode (unconfigured, fork PR, network, timeout, non-2xx) is
+// swallowed with at most an informational notice. Hard-bounded to 5s.
+async function postDashboardEvent(ctx, result, opts) {
+  const { token, url, failOn, version } = opts;
+  if (!token) return;          // not configured — also the case on fork PRs (secrets withheld)
+  if (ctx.isFork) {            // don't attribute a fork's PR to the base repo's analytics
+    notice('Dashboard analytics skipped for a fork PR.');
+    return;
+  }
+  try {
+    const payload = buildDashboardEvent(result, ctx, { failOn, version });
+    const res = await fetch(`${url}/api/review-events`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'codeep-action',
+        [CI_TOKEN_HEADER]: token,
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(DASHBOARD_TIMEOUT_MS),
+    });
+    if (!res.ok) notice(`Dashboard analytics POST returned ${res.status} (ignored).`);
+  } catch (e) {
+    notice(`Dashboard analytics POST skipped: ${(e && e.message) || e} (ignored).`);
+  }
+}
+
 async function main() {
   const version = process.env.INPUT_CODEEP_VERSION || 'latest';
   const failOn = validateFailOn(process.env.INPUT_FAIL_ON);
@@ -166,6 +204,8 @@ async function main() {
   const maxAnnotations = parseInt(process.env.INPUT_MAX_ANNOTATIONS, 10) || 50;
   const maxPerFile = parseInt(process.env.INPUT_MAX_ISSUES_PER_FILE, 10) || 10;
   const token = process.env.GITHUB_TOKEN;
+  const dashboardToken = (process.env.INPUT_DASHBOARD_TOKEN || '').trim();
+  const dashboardUrl = (process.env.INPUT_DASHBOARD_URL || 'https://codeep.dev').trim().replace(/\/+$/, '');
 
   // Resolve PR context from the event payload.
   let event;
@@ -221,6 +261,10 @@ async function main() {
     const body = formatComment(result, { maxPerFile, failOn, version, prNumber: ctx.prNumber });
     await upsertSticky(ctx.owner, ctx.repo, ctx.prNumber, body, token);
   }
+
+  // Team analytics (opt-in via `dashboard-token`). Fire-and-forget — never
+  // affects the check outcome.
+  await postDashboardEvent(ctx, result, { token: dashboardToken, url: dashboardUrl, failOn, version });
 
   // Outputs + exit. The gate is codeep's real exit code — never recomputed here.
   setOutput('skipped', 'false');

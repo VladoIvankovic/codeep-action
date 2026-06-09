@@ -38,6 +38,14 @@ inputs:
     description: "Token used to read PR files and post the comment. Defaults to the workflow's GITHUB_TOKEN."
     required: false
     default: ${{ github.token }}
+  dashboard-token:
+    description: "Optional scoped Codeep CI token (mint one in the dashboard). When set, a compact per-PR review summary (counts + hotspot files, no source) is posted for team analytics. Leave empty to disable. Pass via a secret, e.g. ${{ secrets.CODEEP_DASHBOARD_TOKEN }}."
+    required: false
+    default: ""
+  dashboard-url:
+    description: "Base URL of the Codeep dashboard that receives analytics. Override only for self-hosted deployments."
+    required: false
+    default: "https://codeep.dev"
 
 outputs:
   score:
@@ -59,7 +67,7 @@ runs:
     - name: Set up Node.js
       uses: actions/setup-node@v5
       with:
-        node-version: "20"
+        node-version: "24"
 
     - name: Run Codeep review
       id: review
@@ -74,5 +82,7 @@ runs:
         INPUT_MAX_ANNOTATIONS: ${{ inputs.max-annotations }}
         INPUT_MAX_ISSUES_PER_FILE: ${{ inputs.max-issues-per-file }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_DASHBOARD_TOKEN: ${{ inputs.dashboard-token }}
+        INPUT_DASHBOARD_URL: ${{ inputs.dashboard-url }}
         ACTION_PATH: ${{ github.action_path }}
       run: node "$ACTION_PATH/scripts/review.mjs"

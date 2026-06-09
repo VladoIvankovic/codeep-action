@@ -1,14 +1,78 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseEvent, filterChangedFiles, sanitizeFiles, capIssues, mdInlineCode, asLine } from '../scripts/lib.mjs';
+import { parseEvent, filterChangedFiles, sanitizeFiles, capIssues, mdInlineCode, asLine, buildDashboardEvent } from '../scripts/lib.mjs';
 
 const NUL = String.fromCharCode(0);
 
 test('parseEvent reads PR context from the payload', () => {
-  const ev = { pull_request: { number: 42, base: { sha: 'base1' }, head: { sha: 'head1' } } };
+  const ev = {
+    pull_request: {
+      number: 42, user: { login: 'octocat' },
+      base: { sha: 'base1', repo: { full_name: 'octo/repo' } },
+      head: { sha: 'head1', repo: { full_name: 'octo/repo' } },
+    },
+  };
   assert.deepEqual(parseEvent(ev, 'pull_request', 'octo/repo'), {
     owner: 'octo', repo: 'repo', prNumber: 42, baseSha: 'base1', headSha: 'head1',
+    author: 'octocat', isFork: false,
   });
+});
+
+test('parseEvent flags fork PRs (head repo differs from base, or fork=true)', () => {
+  const differing = {
+    pull_request: {
+      number: 7, base: { repo: { full_name: 'octo/repo' } },
+      head: { repo: { full_name: 'attacker/repo' } },
+    },
+  };
+  assert.equal(parseEvent(differing, 'pull_request', 'octo/repo').isFork, true);
+  const flagged = { pull_request: { number: 8, head: { repo: { fork: true } } } };
+  assert.equal(parseEvent(flagged, 'pull_request', 'octo/repo').isFork, true);
+  // Missing repo metadata → not treated as a fork (same-repo PR with sparse payload).
+  const sparse = { pull_request: { number: 9 } };
+  assert.equal(parseEvent(sparse, 'pull_request', 'octo/repo').isFork, false);
+});
+
+test('buildDashboardEvent emits compact counts + per-file hotspots (no source)', () => {
+  const result = {
+    score: 72,
+    files: ['src/a.ts', 'src/b.ts'],
+    issues: [
+      { file: 'src/a.ts', severity: 'error', category: 'security' },
+      { file: 'src/a.ts', severity: 'warning', category: 'performance' },
+      { file: 'src/b.ts', severity: 'info', category: 'security' },
+    ],
+    summary: {
+      totalIssues: 3,
+      byCategory: { security: 2, performance: 1 },
+      bySeverity: { error: 1, warning: 1, info: 1, suggestion: 0 },
+    },
+  };
+  const ctx = { owner: 'octo', repo: 'repo', prNumber: 42, author: 'octocat', headSha: 'deadbeef' };
+  const ev = buildDashboardEvent(result, ctx, { failOn: 'error', version: '2.7.0' });
+  assert.equal(ev.repo, 'octo/repo');
+  assert.equal(ev.prNumber, 42);
+  assert.equal(ev.author, 'octocat');
+  assert.equal(ev.commitSha, 'deadbeef');
+  assert.equal(ev.score, 72);
+  assert.deepEqual(ev.bySeverity, { error: 1, warning: 1, info: 1 });
+  assert.deepEqual(ev.byCategory, { security: 2, performance: 1 });
+  assert.equal(ev.fileCount, 2);
+  assert.deepEqual(ev.topFiles, [{ file: 'src/a.ts', count: 2 }, { file: 'src/b.ts', count: 1 }]);
+  assert.equal(ev.failOn, 'error');
+  assert.equal(ev.cliVersion, '2.7.0');
+  // No source/message fields leak into the payload.
+  assert.equal(JSON.stringify(ev).includes('message'), false);
+});
+
+test('buildDashboardEvent tolerates an empty/clean result', () => {
+  const ev = buildDashboardEvent({ score: 100, files: [], issues: [], summary: {} },
+    { owner: 'o', repo: 'r', prNumber: 1 }, {});
+  assert.deepEqual(ev.bySeverity, { error: 0, warning: 0, info: 0 });
+  assert.deepEqual(ev.byCategory, {});
+  assert.deepEqual(ev.topFiles, []);
+  assert.equal(ev.fileCount, 0);
+  assert.equal(ev.author, null);
 });
 
 test('parseEvent returns null when not a PR or repo is malformed', () => {

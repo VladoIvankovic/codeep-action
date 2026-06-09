@@ -46,12 +46,64 @@ export function parseEvent(event, eventName, repoFull) {
   if (!number) return null;
   const [owner, repo] = String(repoFull || '').split('/');
   if (!owner || !repo) return null;
+  // A fork PR's head repo differs from the base repo (or is flagged `fork`).
+  // GitHub withholds secrets from fork-PR workflows, so the dashboard token is
+  // absent there anyway — but we also skip posting explicitly (defense + clarity).
+  const headRepo = (pr.head && pr.head.repo) || null;
+  const baseRepo = (pr.base && pr.base.repo) || null;
+  const isFork = !!(
+    (headRepo && headRepo.fork === true)
+    || (headRepo && baseRepo && headRepo.full_name && baseRepo.full_name
+        && headRepo.full_name !== baseRepo.full_name)
+  );
   return {
     owner,
     repo,
     prNumber: Number(number),
     baseSha: (pr.base && pr.base.sha) || '',
     headSha: (pr.head && pr.head.sha) || '',
+    author: (pr.user && typeof pr.user.login === 'string' && pr.user.login) || '',
+    isFork,
+  };
+}
+
+/**
+ * Build the compact analytics payload POSTed to the dashboard (one row per PR
+ * review run). Pure: counts + worst-offender files only — never source or
+ * messages. `summary.byCategory` is already tallied by the CLI; we additionally
+ * tally issues per file to surface review hotspots. `opts.version` is the
+ * requested codeep version/dist-tag, `opts.failOn` the threshold used.
+ */
+export function buildDashboardEvent(result, ctx, opts = {}) {
+  const r = result || {};
+  const summary = r.summary || {};
+  const bySev = summary.bySeverity || {};
+  const fileCounts = new Map();
+  for (const i of r.issues || []) {
+    if (i && typeof i.file === 'string' && i.file) {
+      fileCounts.set(i.file, (fileCounts.get(i.file) || 0) + 1);
+    }
+  }
+  const topFiles = [...fileCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([file, count]) => ({ file, count }));
+  return {
+    repo: `${ctx.owner}/${ctx.repo}`,
+    prNumber: ctx.prNumber,
+    author: ctx.author || null,
+    commitSha: ctx.headSha || null,
+    score: typeof r.score === 'number' ? r.score : null,
+    bySeverity: {
+      error: bySev.error || 0,
+      warning: bySev.warning || 0,
+      info: bySev.info || 0,
+    },
+    byCategory: (summary.byCategory && typeof summary.byCategory === 'object') ? summary.byCategory : {},
+    fileCount: Array.isArray(r.files) ? r.files.length : null,
+    topFiles,
+    failOn: opts.failOn || null,
+    cliVersion: opts.version || null,
   };
 }
 
