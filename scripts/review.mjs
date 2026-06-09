@@ -118,15 +118,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  *
  * Returns { stdout, exitCode }. Calls fail()/process.exit on a fatal outcome.
  */
+// Hard wall-clock bound on a single `codeep review` invocation. A custom rule
+// in an untrusted PR's .codeep/review.json could be slow/catastrophic; without
+// this the runner would hang until the job-level timeout. Generous for a real
+// review, but fatal to a runaway one.
+const REVIEW_TIMEOUT_MS = 180_000;
+
 async function runCodeep(args, attempts = 3) {
   let last;
   for (let i = 1; i <= attempts; i++) {
     try {
-      const r = await execFileP('npx', args, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, env: process.env });
+      const r = await execFileP('npx', args, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: REVIEW_TIMEOUT_MS, env: process.env });
       return { stdout: r.stdout, exitCode: 0 };
     } catch (e) {
       if (e && e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
         fail('codeep review output exceeded the 32MB buffer; cannot parse the result. Scope the PR or raise the limit.');
+      }
+      // Timed out and killed (e.g. a catastrophic-backtracking custom rule, or a
+      // very large PR). Do NOT retry — it would just time out again 3×.
+      if (e && (e.killed === true || e.code === 'ETIMEDOUT')) {
+        fail(`codeep review timed out after ${Math.round(REVIEW_TIMEOUT_MS / 1000)}s. A custom .codeep/review.json rule may be too slow (catastrophic backtracking), or the changed set is too large to review in one pass.`);
       }
       if (e && e.stdout) {
         // codeep ran and produced JSON but exited non-zero → issues tripped the
