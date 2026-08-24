@@ -34,6 +34,26 @@ inputs:
     description: "Maximum issues to list per file in the comment before collapsing to '...and N more'."
     required: false
     default: "10"
+  fix:
+    description: >
+      After reviewing, let an agent fix what was found and open a pull request
+      with the result. Never pushes to the branch under review, and never
+      merges. Requires `contents: write` and `pull-requests: write`, an API key
+      for your provider in the environment, and is skipped on pull requests
+      from forks (their token cannot push). 'true' | 'false'.
+    required: false
+    default: "false"
+  fix-min-severity:
+    description: >
+      Lowest severity a fix may act on: error | warning (default: warning).
+      Suggestions are never eligible — acting on opinion produces churn and
+      buries the findings that matter.
+    required: false
+    default: "warning"
+  fix-branch-prefix:
+    description: "Branch prefix for fix pull requests. The PR number is appended."
+    required: false
+    default: "codeep/fix"
   github-token:
     description: "Token used to read PR files and post the comment. Defaults to the workflow's GITHUB_TOKEN."
     required: false
@@ -54,6 +74,9 @@ outputs:
   total-issues:
     description: "Total number of issues found ('0' when skipped or clean)."
     value: ${{ steps.review.outputs.total-issues }}
+  fix-pr:
+    description: "URL of the pull request opened with fixes, or empty when none was."
+    value: ${{ steps.review.outputs.fix-pr }}
   exit-code:
     description: "Exit code from `codeep review` (0 = passed threshold, 1 = tripped). '0' when skipped."
     value: ${{ steps.review.outputs.exit-code }}
@@ -81,6 +104,9 @@ runs:
         INPUT_FILES: ${{ inputs.files }}
         INPUT_MAX_ANNOTATIONS: ${{ inputs.max-annotations }}
         INPUT_MAX_ISSUES_PER_FILE: ${{ inputs.max-issues-per-file }}
+        INPUT_FIX: ${{ inputs.fix }}
+        INPUT_FIX_MIN_SEVERITY: ${{ inputs.fix-min-severity }}
+        INPUT_FIX_BRANCH_PREFIX: ${{ inputs.fix-branch-prefix }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         INPUT_DASHBOARD_TOKEN: ${{ inputs.dashboard-token }}
         INPUT_DASHBOARD_URL: ${{ inputs.dashboard-url }}

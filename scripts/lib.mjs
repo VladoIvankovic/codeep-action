@@ -64,6 +64,10 @@ export function parseEvent(event, eventName, repoFull) {
     headSha: (pr.head && pr.head.sha) || '',
     author: (pr.user && typeof pr.user.login === 'string' && pr.user.login) || '',
     isFork,
+    // Branch names, needed to open a fix pull request against the branch under
+    // review rather than against the repository's default.
+    headRef: (pr.head && typeof pr.head.ref === 'string' && pr.head.ref) || '',
+    baseRef: (pr.base && typeof pr.base.ref === 'string' && pr.base.ref) || '',
   };
 }
 
@@ -289,4 +293,68 @@ export function formatComment(result, opts = {}) {
   }
   if (truncated) body += `\n\n> …and more issues omitted; total ${total}.`;
   return body + footer;
+}
+
+// ─── fix runs ─────────────────────────────────────────────────────────────────
+
+/**
+ * Whether a fix run may proceed, and why not when it may not.
+ *
+ * The refusals matter more than the permission. A pull request from a fork gets
+ * a read-only token, so pushing a fix branch cannot work — failing the check for
+ * that would punish the contributor for how GitHub scopes tokens. And a run
+ * that found nothing fixable must not create an empty branch.
+ */
+export function fixEligibility({ enabled, isFork, hasWriteToken, fixableCount }) {
+  if (!enabled) return { ok: false, reason: 'not-requested' };
+  if (isFork) return { ok: false, reason: 'fork-pr' };
+  if (!hasWriteToken) return { ok: false, reason: 'no-write-token' };
+  if (!fixableCount) return { ok: false, reason: 'nothing-fixable' };
+  return { ok: true };
+}
+
+/** What to tell the reader, when there is anything worth telling them. */
+export function explainFixSkip(reason) {
+  switch (reason) {
+    case 'fork-pr':
+      return 'Automatic fixes are off for pull requests from forks — the token GitHub issues there cannot push a branch.';
+    case 'no-write-token':
+      return 'Automatic fixes need `contents: write` and `pull-requests: write` permissions on the job.';
+    case 'nothing-fixable':
+      return 'Nothing here is mechanically fixable — the findings are suggestions rather than defects.';
+    default:
+      return null; // 'not-requested' is silence, not a message
+  }
+}
+
+/**
+ * Branch name for a fix. Includes the PR number so successive runs on the same
+ * pull request reuse one branch rather than littering the repository, and is
+ * sanitised because a branch name goes straight into a git command.
+ */
+export function fixBranchName(prNumber, prefix = 'codeep/fix') {
+  const clean = String(prefix)
+    .replace(/[^A-Za-z0-9/_-]/g, '-')
+    .replace(/^[-/]+|[-/]+$/g, '') || 'codeep/fix';
+  const n = Number.parseInt(prNumber, 10);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  return `${clean}/pr-${n}`;
+}
+
+/** Body of the pull request the fix opens. */
+export function fixPullBody({ prNumber, summary, version }) {
+  return [
+    `Applies review findings from #${prNumber}.`,
+    '',
+    summary || 'No summary was produced.',
+    '',
+    '---',
+    '',
+    'Opened by [Codeep](https://codeep.dev) running under a files-and-tests boundary:',
+    'no shell, no network, no git access. It edited the working tree; this branch and',
+    'pull request were made by the action, not the agent.',
+    '',
+    'Review it as you would any other pull request. Nothing here has been merged.',
+    version ? `\n<sub>codeep@${version}</sub>` : '',
+  ].join('\n');
 }

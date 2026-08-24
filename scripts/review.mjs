@@ -195,6 +195,66 @@ async function postDashboardEvent(ctx, result, opts) {
   }
 }
 
+/**
+ * Commit whatever the fix run changed onto its own branch and open a pull
+ * request against the one being reviewed.
+ *
+ * Never pushes to the reviewed branch. Pushing into someone else's pull request
+ * takes a decision that is not ours to take — and on a fork it is not even
+ * possible. A separate branch keeps the fix reviewable and refusable.
+ *
+ * Returns the pull request URL, or '' when nothing changed or the push failed.
+ */
+async function openFixPullRequest({ ctx, token, branch, summary, version }) {
+  const git = async (...args) => {
+    const { stdout } = await execFileP('git', args, { cwd: process.cwd(), maxBuffer: 8 * 1024 * 1024 });
+    return stdout.trim();
+  };
+
+  try {
+    // Nothing to propose is the common case and not a failure.
+    const dirty = await git('status', '--porcelain');
+    if (!dirty) return '';
+
+    await git('config', 'user.name', 'codeep-action');
+    await git('config', 'user.email', 'action@codeep.dev');
+    await git('checkout', '-B', branch);
+    await git('add', '-A');
+    await git('commit', '-m', `fix: apply Codeep review findings from #${ctx.prNumber}`);
+    await git('push', '--force-with-lease', 'origin', branch);
+
+    const res = await fetch(`${API}/repos/${ctx.owner}/${ctx.repo}/pulls`, {
+      method: 'POST',
+      headers: ghHeaders(token, true),
+      body: JSON.stringify({
+        title: `Codeep: fixes for #${ctx.prNumber}`,
+        head: branch,
+        base: ctx.headRef || ctx.baseRef,
+        body: fixPullBody({ prNumber: ctx.prNumber, summary, version }),
+        maintainer_can_modify: true,
+      }),
+    });
+
+    if (res.status === 422) {
+      // A pull request from this branch already exists — successive runs on the
+      // same PR update the branch rather than opening a second one.
+      const open = await fetch(
+        `${API}/repos/${ctx.owner}/${ctx.repo}/pulls?head=${ctx.owner}:${branch}&state=open`,
+        { headers: ghHeaders(token) },
+      );
+      const list = open.ok ? await open.json() : [];
+      return (Array.isArray(list) && list[0] && list[0].html_url) || '';
+    }
+    if (!res.ok) return '';
+    const created = await res.json();
+    return created.html_url || '';
+  } catch (e) {
+    // A failed fix must never fail the review. The findings are already posted.
+    notice(`codeep: could not open a fix pull request (${e && e.message ? e.message : e}).`);
+    return '';
+  }
+}
+
 async function main() {
   const version = process.env.INPUT_CODEEP_VERSION || 'latest';
   const failOn = validateFailOn(process.env.INPUT_FAIL_ON);
@@ -261,6 +321,42 @@ async function main() {
     const body = formatComment(result, { maxPerFile, failOn, version, prNumber: ctx.prNumber });
     await upsertSticky(ctx.owner, ctx.repo, ctx.prNumber, body, token);
   }
+
+  // Optional fix run. Deliberately after the comment and before the outputs:
+  // the findings are already reported and the exit code already decided, so
+  // nothing here can turn a red check green. A fix that hid the finding it
+  // fixed would defeat the point of running a reviewer at all.
+  const wantFix = process.env.INPUT_FIX === 'true';
+  const fixable = (result.issues || []).filter(
+    (i) => i.severity === 'error' || i.severity === 'warning',
+  ).length;
+  const eligibility = fixEligibility({
+    enabled: wantFix,
+    isFork: ctx.isFork === true,
+    hasWriteToken: Boolean(token),
+    fixableCount: fixable,
+  });
+
+  let fixPrUrl = '';
+  if (!eligibility.ok) {
+    const why = explainFixSkip(eligibility.reason);
+    if (why) notice(`codeep: ${why}`);
+  } else {
+    const branch = fixBranchName(ctx.prNumber, process.env.INPUT_FIX_BRANCH_PREFIX || 'codeep/fix');
+    if (!branch) {
+      notice('codeep: could not derive a branch name for the fix; skipping.');
+    } else {
+      const minSeverity = process.env.INPUT_FIX_MIN_SEVERITY === 'error' ? 'error' : 'warning';
+      const fixRun = await runCodeep(['--yes', `codeep@${version}`, 'review', '--fix',
+        '--fix-min-severity', minSeverity, '--json', '--fail-on', 'none', '--', ...files]);
+      let summary = '';
+      try { summary = JSON.parse(fixRun.stdout).fix || ''; } catch { /* summary is optional */ }
+      fixPrUrl = await openFixPullRequest({ ctx, token, branch, summary, version });
+      if (fixPrUrl) notice(`codeep: proposed fixes at ${fixPrUrl}`);
+    }
+  }
+  setOutput('fix-pr', fixPrUrl);
+
 
   // Team analytics (opt-in via `dashboard-token`). Fire-and-forget — never
   // affects the check outcome.

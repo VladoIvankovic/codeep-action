@@ -14,7 +14,7 @@ test('parseEvent reads PR context from the payload', () => {
   };
   assert.deepEqual(parseEvent(ev, 'pull_request', 'octo/repo'), {
     owner: 'octo', repo: 'repo', prNumber: 42, baseSha: 'base1', headSha: 'head1',
-    author: 'octocat', isFork: false,
+    author: 'octocat', isFork: false, headRef: '', baseRef: '',
   });
 });
 
@@ -134,4 +134,27 @@ test('asLine coerces only usable positive integers', () => {
   assert.equal(asLine('12-15'), null); // a range, not a line
   assert.equal(asLine('x'), null);
   assert.equal(asLine(undefined), null);
+});
+
+test('parseEvent carries the branch names a fix pull request needs', () => {
+  const ctx = parseEvent({
+    pull_request: {
+      number: 12,
+      head: { sha: 'aaa', ref: 'feature/login', repo: { full_name: 'me/repo' } },
+      base: { sha: 'bbb', ref: 'main', repo: { full_name: 'me/repo' } },
+      user: { login: 'me' },
+    },
+  }, 'pull_request', 'me/repo');
+
+  assert.equal(ctx.headRef, 'feature/login');
+  assert.equal(ctx.baseRef, 'main');
+  assert.equal(ctx.isFork, false);
+});
+
+test('a malformed event yields empty branch names rather than undefined', () => {
+  const ctx = parseEvent({
+    pull_request: { number: 3, head: {}, base: {}, user: {} },
+  }, 'pull_request', 'me/repo');
+  assert.equal(ctx.headRef, '');
+  assert.equal(ctx.baseRef, '');
 });
