@@ -5,8 +5,10 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+# contents: write lets the fix step push its own branch. It never pushes to the
+# branch under review — see openFixPullRequest in scripts/review.mjs.
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 concurrency:
@@ -22,3 +24,15 @@ jobs:
         uses: ./
         with:
           fail-on: warning
+          fix: true
+        # Reviewing needs no key — it is deterministic and offline. Only the fix
+        # agent runs a model. Every provider Codeep supports is listed; a secret
+        # that does not exist expands to an empty string, which the action
+        # ignores, so setting any single one of these is enough.
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
