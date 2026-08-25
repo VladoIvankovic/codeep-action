@@ -10,7 +10,7 @@ import {
   MARKER, validateFailOn, parseEvent, filterChangedFiles, sanitizeFiles,
   buildAnnotations, formatComment, buildDashboardEvent,
   fixEligibility, explainFixSkip, fixBranchName, fixPullBody, hasProviderApiKey,
-  describeFixOutcome,
+  describeFixOutcome, escapeData,
 } from './lib.mjs';
 
 const execFileP = promisify(execFile);
@@ -18,9 +18,15 @@ const API = 'https://api.github.com';
 const CI_TOKEN_HEADER = 'x-codeep-ci-token';
 const DASHBOARD_TIMEOUT_MS = 5000;
 
-const notice = (m) => console.log(`::notice::${m}`);
-const warn = (m) => console.log(`::warning::${m}`);
-const error = (m) => console.log(`::error::${m}`);
+// Workflow commands are one line. An unescaped newline ends the command and
+// the rest of the message is printed as ordinary log text, detached from the
+// annotation — which is how a git push failure arrived as "Command failed: git
+// push --force-with-lease origin codeep/fix/pr-2" with the actual reason,
+// "(stale info)", stranded on the next line.
+const cmd = (kind) => (m) => console.log(`::${kind}::${escapeData(m)}`);
+const notice = cmd('notice');
+const warn = cmd('warning');
+const error = cmd('error');
 
 function ghHeaders(token, write = false) {
   const h = {
@@ -250,7 +256,20 @@ async function openFixPullRequest({ ctx, token, branch, summary, version }) {
     await git('checkout', '-B', branch);
     await git('add', '-A');
     await git('commit', '-m', `fix: apply Codeep review findings from #${ctx.prNumber}`);
-    await git('push', '--force-with-lease', 'origin', branch);
+
+    // --force-with-lease needs a remote-tracking ref to compare against, and
+    // actions/checkout fetches only the pull request's own ref — so for a fix
+    // branch there is none and git refuses with "stale info" rather than
+    // pushing. Fetching the branch first gives the lease something to hold; if
+    // the branch does not exist upstream yet there is nothing to clobber and a
+    // plain push is correct.
+    let known = true;
+    try {
+      await git('fetch', '--depth', '1', 'origin', `${branch}:refs/remotes/origin/${branch}`);
+    } catch {
+      known = false;
+    }
+    await git('push', ...(known ? ['--force-with-lease'] : []), 'origin', branch);
 
     const res = await fetch(`${API}/repos/${ctx.owner}/${ctx.repo}/pulls`, {
       method: 'POST',
