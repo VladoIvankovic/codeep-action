@@ -352,6 +352,28 @@ export function explainFixSkip(reason) {
 }
 
 /**
+ * What to say after a fix run, whatever happened.
+ *
+ * There are three endings and only one of them used to speak. A pull request
+ * got a notice; an agent that declined, errored, or could not reach a provider
+ * left a clean tree, no pull request, and total silence — the reader saw three
+ * minutes pass in the log and no explanation at either end.
+ *
+ * The CLI already puts the reason in the `fix` field of its JSON: "the run did
+ * not finish", "nothing was changed", "could not run the fix". Discarding that
+ * unless a pull request happened threw the message away in precisely the case
+ * it was written for.
+ */
+export function describeFixOutcome({ prUrl, summary, failed }) {
+  if (failed) return { level: 'warning', text: `codeep: no fixes proposed — ${failed}` };
+  if (prUrl) return { level: 'notice', text: `codeep: proposed fixes at ${prUrl}` };
+  return {
+    level: 'notice',
+    text: `codeep: no pull request opened. ${summary || 'The fix run reported nothing back.'}`,
+  };
+}
+
+/**
  * Branch name for a fix. Includes the PR number so successive runs on the same
  * pull request reuse one branch rather than littering the repository, and is
  * sanitised because a branch name goes straight into a git command.

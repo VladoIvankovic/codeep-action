@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fixEligibility, explainFixSkip, fixBranchName, fixPullBody, hasProviderApiKey } from '../scripts/lib.mjs';
+import { fixEligibility, explainFixSkip, fixBranchName, fixPullBody, hasProviderApiKey, describeFixOutcome } from '../scripts/lib.mjs';
 
 const base = { enabled: true, isFork: false, hasWriteToken: true, hasApiKey: true, fixableCount: 3 };
 
@@ -86,4 +86,33 @@ test('recognises any provider key by shape, not by a list', () => {
   // An empty or whitespace value is how a secret that was never set arrives.
   assert.equal(hasProviderApiKey({ ANTHROPIC_API_KEY: '' }), false);
   assert.equal(hasProviderApiKey({ ANTHROPIC_API_KEY: '   ' }), false);
+});
+
+// Three endings, and only one of them used to say anything. A run that declined
+// or could not reach a provider left a clean tree, no pull request, and silence
+// — three minutes in the log with no explanation at either end.
+test('says what happened whether or not a pull request came of it', () => {
+  const opened = describeFixOutcome({ prUrl: 'https://github.com/o/r/pull/9', summary: 'Edited 1 file.' });
+  assert.equal(opened.level, 'notice');
+  assert.match(opened.text, /pull\/9/);
+
+  const declined = describeFixOutcome({ prUrl: '', summary: 'Nothing was changed — the agent judged the findings not mechanically fixable.' });
+  assert.equal(declined.level, 'notice');
+  assert.match(declined.text, /Nothing was changed/);
+
+  const broke = describeFixOutcome({ prUrl: '', failed: 'The fix agent ran out of time after 600s.' });
+  assert.equal(broke.level, 'warning');
+  assert.match(broke.text, /ran out of time/);
+});
+
+// Silence is the one outcome that must be impossible.
+test('never returns an empty message', () => {
+  for (const args of [
+    { prUrl: '', summary: '' },
+    { prUrl: '', summary: undefined },
+    {},
+  ]) {
+    const out = describeFixOutcome(args);
+    assert.ok(out.text.trim().length > 20, `empty message for ${JSON.stringify(args)}`);
+  }
 });

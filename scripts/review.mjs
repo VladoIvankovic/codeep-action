@@ -10,6 +10,7 @@ import {
   MARKER, validateFailOn, parseEvent, filterChangedFiles, sanitizeFiles,
   buildAnnotations, formatComment, buildDashboardEvent,
   fixEligibility, explainFixSkip, fixBranchName, fixPullBody, hasProviderApiKey,
+  describeFixOutcome,
 } from './lib.mjs';
 
 const execFileP = promisify(execFile);
@@ -383,14 +384,13 @@ async function main() {
         // review is already reported and its exit code is the gate.
         { timeoutMs: FIX_TIMEOUT_MS, soft: true },
       );
-      if (fixRun.failed) {
-        warn(`codeep: no fixes proposed — ${fixRun.failed}`);
-      } else {
-        let summary = '';
-        try { summary = JSON.parse(fixRun.stdout).fix || ''; } catch { /* summary is optional */ }
+      let summary = '';
+      try { summary = JSON.parse(fixRun.stdout).fix || ''; } catch { /* summary is optional */ }
+      if (!fixRun.failed) {
         fixPrUrl = await openFixPullRequest({ ctx, token, branch, summary, version });
-        if (fixPrUrl) notice(`codeep: proposed fixes at ${fixPrUrl}`);
       }
+      const outcome = describeFixOutcome({ prUrl: fixPrUrl, summary, failed: fixRun.failed });
+      (outcome.level === 'warning' ? warn : notice)(outcome.text);
     }
   }
   setOutput('fix-pr', fixPrUrl);
