@@ -59,7 +59,7 @@ inputs:
     required: false
     default: ${{ github.token }}
   dashboard-token:
-    description: "Optional scoped Codeep CI token (mint one in the dashboard). When set, a compact per-PR review summary (counts + hotspot files, no source) is posted for team analytics. Leave empty to disable. Pass via a secret, e.g. ${{ secrets.CODEEP_DASHBOARD_TOKEN }}."
+    description: "Optional scoped Codeep CI token (mint one in the dashboard). When set, a compact per-PR review summary (counts + hotspot files, no source) is posted for team analytics. Leave empty to disable. Pass it from a repository secret; see the README. The braces are left out of this sentence on purpose — GitHub evaluates expressions inside input descriptions, and `secrets` is not a context an action manifest may use, so writing one here stops the whole manifest from loading."
     required: false
     default: ""
   dashboard-url:
