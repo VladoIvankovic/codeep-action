@@ -298,17 +298,39 @@ export function formatComment(result, opts = {}) {
 // ─── fix runs ─────────────────────────────────────────────────────────────────
 
 /**
+ * Does the environment carry a provider key the fix agent could use?
+ *
+ * Matched by shape rather than by a list. Every provider Codeep supports names
+ * its variable `<PROVIDER>_API_KEY` — fourteen of them at the time of writing —
+ * so a list here would be a second copy of `src/config/providers.ts` that goes
+ * stale the first time one is added. The shape is the contract.
+ */
+export function hasProviderApiKey(env = process.env) {
+  return Object.entries(env).some(
+    ([name, value]) => /_API_KEY$/.test(name) && typeof value === 'string' && value.trim() !== '',
+  );
+}
+
+/**
  * Whether a fix run may proceed, and why not when it may not.
  *
  * The refusals matter more than the permission. A pull request from a fork gets
  * a read-only token, so pushing a fix branch cannot work — failing the check for
  * that would punish the contributor for how GitHub scopes tokens. And a run
  * that found nothing fixable must not create an empty branch.
+ *
+ * The key check is here rather than left to fail downstream because without it
+ * a keyless run is *silent*: the agent cannot start, the working tree stays
+ * clean, `openFixPullRequest` correctly declines to open an empty pull request,
+ * and the reader is told nothing at all. Reviewing needs no key — it is
+ * deterministic and offline — so `fix` is the first thing in this action that
+ * requires one, and the first place someone will be surprised.
  */
-export function fixEligibility({ enabled, isFork, hasWriteToken, fixableCount }) {
+export function fixEligibility({ enabled, isFork, hasWriteToken, hasApiKey, fixableCount }) {
   if (!enabled) return { ok: false, reason: 'not-requested' };
   if (isFork) return { ok: false, reason: 'fork-pr' };
   if (!hasWriteToken) return { ok: false, reason: 'no-write-token' };
+  if (!hasApiKey) return { ok: false, reason: 'no-api-key' };
   if (!fixableCount) return { ok: false, reason: 'nothing-fixable' };
   return { ok: true };
 }
@@ -320,6 +342,8 @@ export function explainFixSkip(reason) {
       return 'Automatic fixes are off for pull requests from forks — the token GitHub issues there cannot push a branch.';
     case 'no-write-token':
       return 'Automatic fixes need `contents: write` and `pull-requests: write` permissions on the job.';
+    case 'no-api-key':
+      return 'Automatic fixes need a provider API key in the job environment (e.g. `ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}`). Reviewing itself needs no key; only the fix agent does.';
     case 'nothing-fixable':
       return 'Nothing here is mechanically fixable — the findings are suggestions rather than defects.';
     default:

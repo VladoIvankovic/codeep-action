@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import {
   MARKER, validateFailOn, parseEvent, filterChangedFiles, sanitizeFiles,
   buildAnnotations, formatComment, buildDashboardEvent,
+  fixEligibility, explainFixSkip, fixBranchName, fixPullBody, hasProviderApiKey,
 } from './lib.mjs';
 
 const execFileP = promisify(execFile);
@@ -334,6 +335,7 @@ async function main() {
     enabled: wantFix,
     isFork: ctx.isFork === true,
     hasWriteToken: Boolean(token),
+    hasApiKey: hasProviderApiKey(process.env),
     fixableCount: fixable,
   });
 

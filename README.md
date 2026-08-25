@@ -4,6 +4,8 @@ Run the [Codeep](https://www.npmjs.com/package/codeep) offline code reviewer on 
 
 It's a thin CI wrapper around the Codeep CLI's `review` subcommand: deterministic, **offline, no API key**. The action scopes the review to the PR's changed files and renders the results.
 
+The one exception is the optional [`fix`](#fixing-what-it-finds) input, which hands the findings to an agent — that runs a model, and needs a key. Reviewing never does.
+
 ## What it does
 
 On each pull request it:
@@ -50,6 +52,9 @@ jobs:
 | `files` | `""` | Space-separated file list to review, overriding PR-derived changes. Leave empty for normal use. |
 | `max-annotations` | `50` | Cap on inline annotations emitted. |
 | `max-issues-per-file` | `10` | Issues shown per file in the comment before `...and N more`. |
+| `fix` | `false` | Hand the findings to an agent and open a pull request with the result. See [Fixing what it finds](#fixing-what-it-finds). |
+| `fix-min-severity` | `warning` | Lowest severity a fix may act on: `error` \| `warning`. Suggestions are never eligible. |
+| `fix-branch-prefix` | `codeep/fix` | Branch prefix for fix pull requests. The reviewed PR's number is appended. |
 | `github-token` | `${{ github.token }}` | Token to read PR files + post the comment. |
 | `dashboard-token` | `""` | Optional scoped Codeep CI token for [team analytics](#team-analytics-optional). Empty = disabled. |
 | `dashboard-url` | `https://codeep.dev` | Dashboard base URL that receives analytics. Override only for self-hosted. |
@@ -62,6 +67,7 @@ jobs:
 | `total-issues` | Total issues found (`0` when skipped/clean). |
 | `exit-code` | `codeep review` exit code (`0` passed, `1` tripped). |
 | `skipped` | `true` when no review ran (not a PR, or no reviewable files). |
+| `fix-pr` | URL of the pull request opened by `fix`, or empty when none was. |
 
 ```yaml
       - uses: VladoIvankovic/codeep-action@v1
@@ -69,6 +75,40 @@ jobs:
       - run: echo "Score ${{ steps.codeep.outputs.score }}, issues ${{ steps.codeep.outputs.total-issues }}"
         if: always()
 ```
+
+## Fixing what it finds
+
+Off by default. With `fix: true` the action hands what the review found to an agent, lets it edit the code, and **opens a second pull request** against the branch under review.
+
+```yaml
+permissions:
+  contents: write        # to push the fix branch
+  pull-requests: write   # to open the fix PR and post the comment
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: VladoIvankovic/codeep-action@v1
+        with:
+          fix: true
+          fix-min-severity: warning
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+**The key goes in `env`, not `with`.** Reviewing needs none; the fix agent runs a model and does. Any provider Codeep supports works — set that provider's own variable (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, and so on). Without one the action says so and skips the fix rather than failing quietly.
+
+### What it will not do
+
+- **Never pushes to the branch under review.** Your PR is left exactly as you left it; fixes arrive as a separate PR you can read, amend, or close.
+- **Never merges anything.**
+- **Never touches suggestions.** Only `error` and `warning` — acting on opinion produces churn and buries the findings that matter.
+- **Never runs on fork PRs.** GitHub issues a read-only token there, so pushing a branch cannot work.
+- **Runs with no shell, no git, no network.** The agent gets file editing and the test runner, enforced by the same capability boundary as any custom Codeep agent — not by asking it nicely in a prompt.
+
+The fix step runs *after* the review is reported, and **never changes the check's outcome**. A failed fix cannot turn a passing review red.
 
 ## Fork PRs (important)
 
