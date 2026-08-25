@@ -50,3 +50,40 @@ test('review.mjs imports nothing it does not use', () => {
   const unused = imported.filter(name => !new RegExp(`\\b${name}\\b`).test(body));
   assert.deepEqual(unused, [], `imported but never used: ${unused.join(', ')}`);
 });
+
+const actionYml = readFileSync(join(root, 'action.yml'), 'utf8');
+const libSrc = readFileSync(join(root, 'scripts', 'lib.mjs'), 'utf8');
+
+/**
+ * Every INPUT_* the scripts read must be passed through by the manifest.
+ *
+ * An action's inputs do not reach the script by themselves — each one has to be
+ * named again under `runs.env`. Miss one and the input silently takes its
+ * default forever: `fix` shipped that way once, which quietly disabled the
+ * entire feature for anyone who set it.
+ */
+test('every INPUT_* the scripts read is passed through by action.yml', () => {
+  const read = [...new Set(
+    [...(review + libSrc).matchAll(/process\.env\.(INPUT_[A-Z_]+)/g)].map(m => m[1]),
+  )].sort();
+  assert.ok(read.length > 5, 'expected to find INPUT_* reads; the regex may have rotted');
+
+  const passed = new Set(
+    [...actionYml.matchAll(/^\s+(INPUT_[A-Z_]+):/gm)].map(m => m[1]),
+  );
+
+  const missing = read.filter(name => !passed.has(name));
+  assert.deepEqual(missing, [], `read by the scripts, never passed by action.yml: ${missing.join(', ')}`);
+});
+
+/**
+ * And the reverse: a passthrough nothing reads is a rename half-done.
+ */
+test('action.yml passes no INPUT_* the scripts ignore', () => {
+  const passed = [...new Set(
+    [...actionYml.matchAll(/^\s+(INPUT_[A-Z_]+):/gm)].map(m => m[1]),
+  )].sort();
+  const source = review + libSrc;
+  const unread = passed.filter(name => !source.includes(name));
+  assert.deepEqual(unread, [], `passed by action.yml, never read: ${unread.join(', ')}`);
+});

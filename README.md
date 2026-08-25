@@ -55,6 +55,7 @@ jobs:
 | `fix` | `false` | Hand the findings to an agent and open a pull request with the result. See [Fixing what it finds](#fixing-what-it-finds). |
 | `fix-min-severity` | `warning` | Lowest severity a fix may act on: `error` \| `warning`. Suggestions are never eligible. |
 | `fix-branch-prefix` | `codeep/fix` | Branch prefix for fix pull requests. The reviewed PR's number is appended. |
+| `fix-timeout` | `600` | Seconds the fix agent may run (minimum 60). Separate from the review's own, much tighter bound. |
 | `github-token` | `${{ github.token }}` | Token to read PR files + post the comment. |
 | `dashboard-token` | `""` | Optional scoped Codeep CI token for [team analytics](#team-analytics-optional). Empty = disabled. |
 | `dashboard-url` | `https://codeep.dev` | Dashboard base URL that receives analytics. Override only for self-hosted. |
@@ -110,6 +111,12 @@ jobs:
 
 The fix step runs *after* the review is reported, and **never changes the check's outcome**. A failed fix cannot turn a passing review red.
 
+### If the fix runs out of time
+
+Reviewing is regex over a diff and finishes in seconds. A fix reads files, edits them and runs your test suite, so it gets its own budget — `fix-timeout`, 600 seconds by default. Running out is reported as a warning and the check keeps the review's result.
+
+If you hit it regularly, raise `fix-timeout` or narrow what the agent takes on with `fix-min-severity: error`.
+
 ## Fork PRs (important)
 
 On pull requests **from forks**, GitHub forces `GITHUB_TOKEN` to **read-only** regardless of the `permissions:` block — by design. The review still runs and you still get **inline annotations + a pass/fail check**; only the summary **comment** is skipped (you'll see a `::warning::` in the log). **Findings are never lost.**
@@ -123,7 +130,7 @@ Set `dashboard-token` to send a **compact per-PR review summary** to your Codeep
 Mint a scoped CI token in the dashboard (Settings → CI tokens), store it as a repo/org secret, and pass it:
 
 ```yaml
-      - uses: VladoIvankovic/codeep-action@v1.0.3
+      - uses: VladoIvankovic/codeep-action@v1
         with:
           fail-on: error
           dashboard-token: ${{ secrets.CODEEP_DASHBOARD_TOKEN }}

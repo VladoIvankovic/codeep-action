@@ -127,7 +127,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // review, but fatal to a runaway one.
 const REVIEW_TIMEOUT_MS = 180_000;
 
-async function runCodeep(args, attempts = 3) {
+// A fix run is a different animal on the same command. The review is regex over
+// a diff and finishes in seconds; the fix runs an agent that reads files, edits
+// them and runs the test suite. Holding it to the review's bound killed the
+// first real fix at exactly 180s. Configurable because "long enough" depends on
+// the project's test suite, not on anything this action can know.
+const FIX_TIMEOUT_MS = Math.max(
+  60_000,
+  (Number(process.env.INPUT_FIX_TIMEOUT) || 600) * 1000,
+);
+
+/**
+ * Run the CLI.
+ *
+ * `soft` is the difference between the two callers. A review that cannot run is
+ * a failed check — there is no result to report. A *fix* that cannot run is a
+ * fix that did not happen, and the action documents that a fix never changes
+ * the check's outcome. Calling fail() there would turn a clean review red
+ * because an optional extra step ran out of time.
+ */
+async function runCodeep(args, { attempts = 3, timeoutMs = REVIEW_TIMEOUT_MS, soft = false } = {}) {
+  const giveUp = (message) => {
+    if (soft) return { stdout: '', exitCode: 1, failed: message };
+    fail(message);
+    return { stdout: '', exitCode: 1 }; // unreachable (fail exits); satisfies callers
+  };
   // The review child runs the CLI against PR-influenced config (custom
   // .codeep/review rules). It never needs the dashboard secret — that token is
   // only used by the analytics POST in THIS process — so strip it from the
@@ -137,16 +161,20 @@ async function runCodeep(args, attempts = 3) {
   let last;
   for (let i = 1; i <= attempts; i++) {
     try {
-      const r = await execFileP('npx', args, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: REVIEW_TIMEOUT_MS, env: childEnv });
+      const r = await execFileP('npx', args, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: timeoutMs, env: childEnv });
       return { stdout: r.stdout, exitCode: 0 };
     } catch (e) {
       if (e && e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
-        fail('codeep review output exceeded the 32MB buffer; cannot parse the result. Scope the PR or raise the limit.');
+        return giveUp('codeep output exceeded the 32MB buffer; cannot parse the result. Scope the PR or raise the limit.');
       }
       // Timed out and killed (e.g. a catastrophic-backtracking custom rule, or a
       // very large PR). Do NOT retry — it would just time out again 3×.
       if (e && (e.killed === true || e.code === 'ETIMEDOUT')) {
-        fail(`codeep review timed out after ${Math.round(REVIEW_TIMEOUT_MS / 1000)}s. A custom .codeep/review.json rule may be too slow (catastrophic backtracking), or the changed set is too large to review in one pass.`);
+        return giveUp(
+          soft
+            ? `The fix agent ran out of time after ${Math.round(timeoutMs / 1000)}s. Raise \`fix-timeout\` if the project's tests are slow, or narrow the review with \`fix-min-severity: error\`.`
+            : `codeep review timed out after ${Math.round(timeoutMs / 1000)}s. A custom .codeep/review.json rule may be too slow (catastrophic backtracking), or the changed set is too large to review in one pass.`,
+        );
       }
       if (e && e.stdout) {
         // codeep ran and produced JSON but exited non-zero → issues tripped the
@@ -162,8 +190,7 @@ async function runCodeep(args, attempts = 3) {
     }
   }
   const detail = String((last && (last.stderr || last.message)) || '').slice(0, 2000);
-  fail(`codeep review failed to run after ${attempts} attempts (npx exit: ${last && last.code}): ${detail}`);
-  return { stdout: '', exitCode: 1 }; // unreachable (fail exits); satisfies callers
+  return giveUp(`codeep failed to run after ${attempts} attempts (npx exit: ${last && last.code}): ${detail}`);
 }
 
 // Fire-and-forget: POST a compact review summary (counts + worst-offender
@@ -349,12 +376,21 @@ async function main() {
       notice('codeep: could not derive a branch name for the fix; skipping.');
     } else {
       const minSeverity = process.env.INPUT_FIX_MIN_SEVERITY === 'error' ? 'error' : 'warning';
-      const fixRun = await runCodeep(['--yes', `codeep@${version}`, 'review', '--fix',
-        '--fix-min-severity', minSeverity, '--json', '--fail-on', 'none', '--', ...files]);
-      let summary = '';
-      try { summary = JSON.parse(fixRun.stdout).fix || ''; } catch { /* summary is optional */ }
-      fixPrUrl = await openFixPullRequest({ ctx, token, branch, summary, version });
-      if (fixPrUrl) notice(`codeep: proposed fixes at ${fixPrUrl}`);
+      const fixRun = await runCodeep(
+        ['--yes', `codeep@${version}`, 'review', '--fix',
+          '--fix-min-severity', minSeverity, '--json', '--fail-on', 'none', '--', ...files],
+        // soft: a fix that cannot finish is a fix that did not happen. The
+        // review is already reported and its exit code is the gate.
+        { timeoutMs: FIX_TIMEOUT_MS, soft: true },
+      );
+      if (fixRun.failed) {
+        warn(`codeep: no fixes proposed — ${fixRun.failed}`);
+      } else {
+        let summary = '';
+        try { summary = JSON.parse(fixRun.stdout).fix || ''; } catch { /* summary is optional */ }
+        fixPrUrl = await openFixPullRequest({ ctx, token, branch, summary, version });
+        if (fixPrUrl) notice(`codeep: proposed fixes at ${fixPrUrl}`);
+      }
     }
   }
   setOutput('fix-pr', fixPrUrl);

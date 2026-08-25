@@ -54,6 +54,15 @@ inputs:
     description: "Branch prefix for fix pull requests. The PR number is appended."
     required: false
     default: "codeep/fix"
+  fix-timeout:
+    description: >
+      Seconds the fix agent may run before it is stopped (default: 600, minimum
+      60). The review's own bound is separate and much tighter — reviewing is
+      regex over a diff, while a fix reads files, edits them and runs your test
+      suite. Raise this if your tests are slow. Running out of time is reported
+      and never fails the check.
+    required: false
+    default: "600"
   github-token:
     description: "Token used to read PR files and post the comment. Defaults to the workflow's GITHUB_TOKEN."
     required: false
@@ -107,6 +116,7 @@ runs:
         INPUT_FIX: ${{ inputs.fix }}
         INPUT_FIX_MIN_SEVERITY: ${{ inputs.fix-min-severity }}
         INPUT_FIX_BRANCH_PREFIX: ${{ inputs.fix-branch-prefix }}
+        INPUT_FIX_TIMEOUT: ${{ inputs.fix-timeout }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         INPUT_DASHBOARD_TOKEN: ${{ inputs.dashboard-token }}
         INPUT_DASHBOARD_URL: ${{ inputs.dashboard-url }}
