@@ -7,15 +7,11 @@
  */
 
 export async function loadAll(ids, fetchOne) {
-  const out = [];
-  // foreach-await: sequential when it does not need to be.
-  ids.forEach(async (id) => {
-    out.push(await fetchOne(id));
-  });
-  return out;
+  return Promise.all(ids.map((id) => fetchOne(id)));
 }
 
 export function render(el, name) {
-  // inner-html: unescaped interpolation into the DOM.
-  el.innerHTML = '<span>' + name + '</span>';
+  const span = document.createElement('span');
+  span.textContent = name;
+  el.replaceChildren(span);
 }
