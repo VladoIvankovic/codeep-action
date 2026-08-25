@@ -247,9 +247,21 @@ async function openFixPullRequest({ ctx, token, branch, summary, version }) {
   };
 
   try {
-    // Nothing to propose is the common case and not a failure.
+    // Nothing to propose is the common case and not a failure. Say which case
+    // it was, though: "the agent declined" and "the agent edited a file and
+    // git cannot see it" look identical from the outside and are not remotely
+    // the same problem.
     const dirty = await git('status', '--porcelain');
-    if (!dirty) return '';
+    if (!dirty) {
+      // "The agent declined" and "the agent edited a file and git cannot see
+      // it" are indistinguishable from the outside and are not the same
+      // problem at all, so say where git looked before concluding nothing
+      // happened.
+      const top = await git('rev-parse', '--show-toplevel').catch(() => '(not a repository)');
+      notice(`codeep: the working tree is unchanged. git ran in ${process.cwd()}, repository root ${top}.`);
+      return '';
+    }
+    notice(`codeep: ${dirty.split('\n').length} changed path(s) to propose.`);
 
     await git('config', 'user.name', 'codeep-action');
     await git('config', 'user.email', 'action@codeep.dev');
