@@ -231,6 +231,30 @@ async function postDashboardEvent(ctx, result, opts) {
 }
 
 /**
+ * Turn a failed GitHub response into something worth reading.
+ *
+ * One failure mode deserves naming outright. A repository has a setting —
+ * Settings → Actions → General → Workflow permissions → "Allow GitHub Actions
+ * to create and approve pull requests" — that is **off by default** and that a
+ * workflow's own `permissions:` block cannot override. With it off, everything
+ * up to and including the push succeeds and only the final POST is refused, so
+ * the branch sits there with the fix on it and no pull request in sight.
+ */
+async function describeGhError(res) {
+  const body = await res.text().catch(() => '');
+  let message = body.slice(0, 300);
+  try { message = JSON.parse(body).message || message; } catch { /* keep the raw text */ }
+
+  if (/not permitted to create or approve pull requests/i.test(message)) {
+    return `${res.status} — this repository does not allow GitHub Actions to open pull requests. `
+      + 'Turn on Settings → Actions → General → Workflow permissions → '
+      + '"Allow GitHub Actions to create and approve pull requests". A workflow\'s '
+      + 'own permissions block cannot grant this one.';
+  }
+  return `${res.status} ${message}`;
+}
+
+/**
  * Commit whatever the fix run changed onto its own branch and open a pull
  * request against the one being reviewed.
  *
@@ -296,16 +320,27 @@ async function openFixPullRequest({ ctx, token, branch, summary, version }) {
     });
 
     if (res.status === 422) {
-      // A pull request from this branch already exists — successive runs on the
-      // same PR update the branch rather than opening a second one.
+      // 422 usually means a pull request from this branch already exists —
+      // successive runs on the same PR update the branch rather than opening a
+      // second one. It is not the only 422 GitHub sends, though, so if no open
+      // pull request turns up, report what it actually said.
       const open = await fetch(
         `${API}/repos/${ctx.owner}/${ctx.repo}/pulls?head=${ctx.owner}:${branch}&state=open`,
         { headers: ghHeaders(token) },
       );
       const list = open.ok ? await open.json() : [];
-      return (Array.isArray(list) && list[0] && list[0].html_url) || '';
+      const existing = (Array.isArray(list) && list[0] && list[0].html_url) || '';
+      if (existing) return existing;
+      warn(`codeep: the fix branch is pushed but GitHub declined to open a pull request: ${await describeGhError(res)}`);
+      return '';
     }
-    if (!res.ok) return '';
+    if (!res.ok) {
+      // The branch is already pushed at this point, so silence here is the
+      // worst possible outcome: the work exists and nothing says where. The
+      // common cause is a repository setting rather than anything in the diff.
+      warn(`codeep: the fix branch \`${branch}\` is pushed, but the pull request could not be opened: ${await describeGhError(res)}`);
+      return '';
+    }
     const created = await res.json();
     return created.html_url || '';
   } catch (e) {

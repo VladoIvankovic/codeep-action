@@ -99,6 +99,9 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
+> **One repository setting is required, and it is off by default.**
+> Turn on **Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests"**. Without it the review runs, the agent fixes the code, and the branch is pushed — and only the final step is refused with a 403, leaving the work stranded on a branch with no pull request. A workflow's own `permissions:` block **cannot** grant this one.
+
 **The key goes in `env`, not `with`.** Reviewing needs none; the fix agent runs a model and does. Any provider Codeep supports works — set that provider's own variable (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, and so on). Without one the action says so and skips the fix rather than failing quietly.
 
 ### What it will not do
