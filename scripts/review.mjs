@@ -10,6 +10,7 @@ import {
   MARKER, validateFailOn, parseEvent, filterChangedFiles, sanitizeFiles,
   buildAnnotations, formatComment, buildDashboardEvent,
   fixEligibility, explainFixSkip, fixBranchName, fixPullBody, hasProviderApiKey,
+  describeFixOutcome, escapeData,
 } from './lib.mjs';
 
 const execFileP = promisify(execFile);
@@ -17,9 +18,15 @@ const API = 'https://api.github.com';
 const CI_TOKEN_HEADER = 'x-codeep-ci-token';
 const DASHBOARD_TIMEOUT_MS = 5000;
 
-const notice = (m) => console.log(`::notice::${m}`);
-const warn = (m) => console.log(`::warning::${m}`);
-const error = (m) => console.log(`::error::${m}`);
+// Workflow commands are one line. An unescaped newline ends the command and
+// the rest of the message is printed as ordinary log text, detached from the
+// annotation — which is how a git push failure arrived as "Command failed: git
+// push --force-with-lease origin codeep/fix/pr-2" with the actual reason,
+// "(stale info)", stranded on the next line.
+const cmd = (kind) => (m) => console.log(`::${kind}::${escapeData(m)}`);
+const notice = cmd('notice');
+const warn = cmd('warning');
+const error = cmd('error');
 
 function ghHeaders(token, write = false) {
   const h = {
@@ -127,7 +134,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // review, but fatal to a runaway one.
 const REVIEW_TIMEOUT_MS = 180_000;
 
-async function runCodeep(args, attempts = 3) {
+// A fix run is a different animal on the same command. The review is regex over
+// a diff and finishes in seconds; the fix runs an agent that reads files, edits
+// them and runs the test suite. Holding it to the review's bound killed the
+// first real fix at exactly 180s. Configurable because "long enough" depends on
+// the project's test suite, not on anything this action can know.
+const FIX_TIMEOUT_MS = Math.max(
+  60_000,
+  (Number(process.env.INPUT_FIX_TIMEOUT) || 600) * 1000,
+);
+
+/**
+ * Run the CLI.
+ *
+ * `soft` is the difference between the two callers. A review that cannot run is
+ * a failed check — there is no result to report. A *fix* that cannot run is a
+ * fix that did not happen, and the action documents that a fix never changes
+ * the check's outcome. Calling fail() there would turn a clean review red
+ * because an optional extra step ran out of time.
+ */
+async function runCodeep(args, { attempts = 3, timeoutMs = REVIEW_TIMEOUT_MS, soft = false } = {}) {
+  const giveUp = (message) => {
+    if (soft) return { stdout: '', exitCode: 1, failed: message };
+    fail(message);
+    return { stdout: '', exitCode: 1 }; // unreachable (fail exits); satisfies callers
+  };
   // The review child runs the CLI against PR-influenced config (custom
   // .codeep/review rules). It never needs the dashboard secret — that token is
   // only used by the analytics POST in THIS process — so strip it from the
@@ -137,16 +168,20 @@ async function runCodeep(args, attempts = 3) {
   let last;
   for (let i = 1; i <= attempts; i++) {
     try {
-      const r = await execFileP('npx', args, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: REVIEW_TIMEOUT_MS, env: childEnv });
+      const r = await execFileP('npx', args, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: timeoutMs, env: childEnv });
       return { stdout: r.stdout, exitCode: 0 };
     } catch (e) {
       if (e && e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
-        fail('codeep review output exceeded the 32MB buffer; cannot parse the result. Scope the PR or raise the limit.');
+        return giveUp('codeep output exceeded the 32MB buffer; cannot parse the result. Scope the PR or raise the limit.');
       }
       // Timed out and killed (e.g. a catastrophic-backtracking custom rule, or a
       // very large PR). Do NOT retry — it would just time out again 3×.
       if (e && (e.killed === true || e.code === 'ETIMEDOUT')) {
-        fail(`codeep review timed out after ${Math.round(REVIEW_TIMEOUT_MS / 1000)}s. A custom .codeep/review.json rule may be too slow (catastrophic backtracking), or the changed set is too large to review in one pass.`);
+        return giveUp(
+          soft
+            ? `The fix agent ran out of time after ${Math.round(timeoutMs / 1000)}s. Raise \`fix-timeout\` if the project's tests are slow, or narrow the review with \`fix-min-severity: error\`.`
+            : `codeep review timed out after ${Math.round(timeoutMs / 1000)}s. A custom .codeep/review.json rule may be too slow (catastrophic backtracking), or the changed set is too large to review in one pass.`,
+        );
       }
       if (e && e.stdout) {
         // codeep ran and produced JSON but exited non-zero → issues tripped the
@@ -162,8 +197,7 @@ async function runCodeep(args, attempts = 3) {
     }
   }
   const detail = String((last && (last.stderr || last.message)) || '').slice(0, 2000);
-  fail(`codeep review failed to run after ${attempts} attempts (npx exit: ${last && last.code}): ${detail}`);
-  return { stdout: '', exitCode: 1 }; // unreachable (fail exits); satisfies callers
+  return giveUp(`codeep failed to run after ${attempts} attempts (npx exit: ${last && last.code}): ${detail}`);
 }
 
 // Fire-and-forget: POST a compact review summary (counts + worst-offender
@@ -197,6 +231,30 @@ async function postDashboardEvent(ctx, result, opts) {
 }
 
 /**
+ * Turn a failed GitHub response into something worth reading.
+ *
+ * One failure mode deserves naming outright. A repository has a setting —
+ * Settings → Actions → General → Workflow permissions → "Allow GitHub Actions
+ * to create and approve pull requests" — that is **off by default** and that a
+ * workflow's own `permissions:` block cannot override. With it off, everything
+ * up to and including the push succeeds and only the final POST is refused, so
+ * the branch sits there with the fix on it and no pull request in sight.
+ */
+async function describeGhError(res) {
+  const body = await res.text().catch(() => '');
+  let message = body.slice(0, 300);
+  try { message = JSON.parse(body).message || message; } catch { /* keep the raw text */ }
+
+  if (/not permitted to create or approve pull requests/i.test(message)) {
+    return `${res.status} — this repository does not allow GitHub Actions to open pull requests. `
+      + 'Turn on Settings → Actions → General → Workflow permissions → '
+      + '"Allow GitHub Actions to create and approve pull requests". A workflow\'s '
+      + 'own permissions block cannot grant this one.';
+  }
+  return `${res.status} ${message}`;
+}
+
+/**
  * Commit whatever the fix run changed onto its own branch and open a pull
  * request against the one being reviewed.
  *
@@ -213,16 +271,47 @@ async function openFixPullRequest({ ctx, token, branch, summary, version }) {
   };
 
   try {
-    // Nothing to propose is the common case and not a failure.
-    const dirty = await git('status', '--porcelain');
-    if (!dirty) return '';
+    // Nothing to propose is the common case and not a failure. Say which case
+    // it was, though: "the agent declined" and "the agent edited a file and
+    // git cannot see it" look identical from the outside and are not remotely
+    // the same problem.
+    // `.codeep/` is the agent's own bookkeeping — the audit record and its
+    // progress log. Both are written during the run, and sweeping them into
+    // someone's pull request puts a transcript of the prompt in their diff and
+    // buries the two-line fix they actually have to read. Excluded from the
+    // dirty check too, or a run that changed no code would still look dirty
+    // and push an empty commit.
+    const dirty = await git('status', '--porcelain', '--', '.', ':!.codeep');
+    if (!dirty) {
+      // "The agent declined" and "the agent edited a file and git cannot see
+      // it" are indistinguishable from the outside and are not the same
+      // problem at all, so say where git looked before concluding nothing
+      // happened.
+      const top = await git('rev-parse', '--show-toplevel').catch(() => '(not a repository)');
+      notice(`codeep: the working tree is unchanged. git ran in ${process.cwd()}, repository root ${top}.`);
+      return '';
+    }
+    notice(`codeep: ${dirty.split('\n').length} changed path(s) to propose.`);
 
     await git('config', 'user.name', 'codeep-action');
     await git('config', 'user.email', 'action@codeep.dev');
     await git('checkout', '-B', branch);
-    await git('add', '-A');
+    await git('add', '-A', '--', '.', ':!.codeep');
     await git('commit', '-m', `fix: apply Codeep review findings from #${ctx.prNumber}`);
-    await git('push', '--force-with-lease', 'origin', branch);
+
+    // --force-with-lease needs a remote-tracking ref to compare against, and
+    // actions/checkout fetches only the pull request's own ref — so for a fix
+    // branch there is none and git refuses with "stale info" rather than
+    // pushing. Fetching the branch first gives the lease something to hold; if
+    // the branch does not exist upstream yet there is nothing to clobber and a
+    // plain push is correct.
+    let known = true;
+    try {
+      await git('fetch', '--depth', '1', 'origin', `${branch}:refs/remotes/origin/${branch}`);
+    } catch {
+      known = false;
+    }
+    await git('push', ...(known ? ['--force-with-lease'] : []), 'origin', branch);
 
     const res = await fetch(`${API}/repos/${ctx.owner}/${ctx.repo}/pulls`, {
       method: 'POST',
@@ -237,16 +326,27 @@ async function openFixPullRequest({ ctx, token, branch, summary, version }) {
     });
 
     if (res.status === 422) {
-      // A pull request from this branch already exists — successive runs on the
-      // same PR update the branch rather than opening a second one.
+      // 422 usually means a pull request from this branch already exists —
+      // successive runs on the same PR update the branch rather than opening a
+      // second one. It is not the only 422 GitHub sends, though, so if no open
+      // pull request turns up, report what it actually said.
       const open = await fetch(
         `${API}/repos/${ctx.owner}/${ctx.repo}/pulls?head=${ctx.owner}:${branch}&state=open`,
         { headers: ghHeaders(token) },
       );
       const list = open.ok ? await open.json() : [];
-      return (Array.isArray(list) && list[0] && list[0].html_url) || '';
+      const existing = (Array.isArray(list) && list[0] && list[0].html_url) || '';
+      if (existing) return existing;
+      warn(`codeep: the fix branch is pushed but GitHub declined to open a pull request: ${await describeGhError(res)}`);
+      return '';
     }
-    if (!res.ok) return '';
+    if (!res.ok) {
+      // The branch is already pushed at this point, so silence here is the
+      // worst possible outcome: the work exists and nothing says where. The
+      // common cause is a repository setting rather than anything in the diff.
+      warn(`codeep: the fix branch \`${branch}\` is pushed, but the pull request could not be opened: ${await describeGhError(res)}`);
+      return '';
+    }
     const created = await res.json();
     return created.html_url || '';
   } catch (e) {
@@ -349,12 +449,20 @@ async function main() {
       notice('codeep: could not derive a branch name for the fix; skipping.');
     } else {
       const minSeverity = process.env.INPUT_FIX_MIN_SEVERITY === 'error' ? 'error' : 'warning';
-      const fixRun = await runCodeep(['--yes', `codeep@${version}`, 'review', '--fix',
-        '--fix-min-severity', minSeverity, '--json', '--fail-on', 'none', '--', ...files]);
+      const fixRun = await runCodeep(
+        ['--yes', `codeep@${version}`, 'review', '--fix',
+          '--fix-min-severity', minSeverity, '--json', '--fail-on', 'none', '--', ...files],
+        // soft: a fix that cannot finish is a fix that did not happen. The
+        // review is already reported and its exit code is the gate.
+        { timeoutMs: FIX_TIMEOUT_MS, soft: true },
+      );
       let summary = '';
       try { summary = JSON.parse(fixRun.stdout).fix || ''; } catch { /* summary is optional */ }
-      fixPrUrl = await openFixPullRequest({ ctx, token, branch, summary, version });
-      if (fixPrUrl) notice(`codeep: proposed fixes at ${fixPrUrl}`);
+      if (!fixRun.failed) {
+        fixPrUrl = await openFixPullRequest({ ctx, token, branch, summary, version });
+      }
+      const outcome = describeFixOutcome({ prUrl: fixPrUrl, summary, failed: fixRun.failed });
+      (outcome.level === 'warning' ? warn : notice)(outcome.text);
     }
   }
   setOutput('fix-pr', fixPrUrl);
