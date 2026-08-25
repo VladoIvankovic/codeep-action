@@ -275,7 +275,13 @@ async function openFixPullRequest({ ctx, token, branch, summary, version }) {
     // it was, though: "the agent declined" and "the agent edited a file and
     // git cannot see it" look identical from the outside and are not remotely
     // the same problem.
-    const dirty = await git('status', '--porcelain');
+    // `.codeep/` is the agent's own bookkeeping — the audit record and its
+    // progress log. Both are written during the run, and sweeping them into
+    // someone's pull request puts a transcript of the prompt in their diff and
+    // buries the two-line fix they actually have to read. Excluded from the
+    // dirty check too, or a run that changed no code would still look dirty
+    // and push an empty commit.
+    const dirty = await git('status', '--porcelain', '--', '.', ':!.codeep');
     if (!dirty) {
       // "The agent declined" and "the agent edited a file and git cannot see
       // it" are indistinguishable from the outside and are not the same
@@ -290,7 +296,7 @@ async function openFixPullRequest({ ctx, token, branch, summary, version }) {
     await git('config', 'user.name', 'codeep-action');
     await git('config', 'user.email', 'action@codeep.dev');
     await git('checkout', '-B', branch);
-    await git('add', '-A');
+    await git('add', '-A', '--', '.', ':!.codeep');
     await git('commit', '-m', `fix: apply Codeep review findings from #${ctx.prNumber}`);
 
     // --force-with-lease needs a remote-tracking ref to compare against, and
